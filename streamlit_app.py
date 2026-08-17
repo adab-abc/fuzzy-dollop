@@ -1,65 +1,97 @@
-import streamlit as st
-import tempfile
+# -*- coding: utf-8 -*-
+
 import os
+import tempfile
+import streamlit as st
+import pandas as pd
 
 from parser import parseWorkbook
 from analyzer import analyzeAssay
 from reporter import generateExcelReport
 
 st.set_page_config(
-    page_title="Assay Processor",
+    page_title="Automated Assay Processor",
     layout="wide"
 )
 
-st.title("Automated Assay Processing")
+st.title("Automated Assay Processing Tool")
+
+st.write(
+    """
+    Upload an assay workbook,
+    select a worksheet,
+    run the analysis,
+    and download the completed report.
+    """
+)
 
 uploadedFile = st.file_uploader(
-    "Upload Assay Workbook",
+    "Upload Excel Workbook",
     type=["xlsx", "xlsm"]
 )
 
 if uploadedFile is not None:
 
-    st.success("Workbook uploaded")
+    suffix = os.path.splitext(uploadedFile.name)[1]
 
     with tempfile.NamedTemporaryFile(
         delete=False,
-        suffix=os.path.splitext(uploadedFile.name)[1]
+        suffix=suffix
     ) as tempFile:
 
         tempFile.write(uploadedFile.getvalue())
 
         workbookPath = tempFile.name
 
-    try:
+    excelBook = pd.ExcelFile(workbookPath)
 
-        assayData, workbookPath, worksheetName = parseWorkbook(
-            workbookPath
-        )
+    worksheetName = st.selectbox(
+        "Select Worksheet",
+        excelBook.sheet_names
+    )
 
-        st.write("Analyzing assay...")
+    if st.button("Process Workbook"):
 
-        analysisData = analyzeAssay(
-            assayData
-        )
+        try:
 
-        generateExcelReport(
-            workbookPath,
-            worksheetName,
-            analysisData
-        )
+            with st.spinner("Parsing workbook..."):
 
-        st.success("Analysis complete")
+                assayData, workbookPath, worksheetName = parseWorkbook(
+                    workbookPath,
+                    worksheetName
+                )
 
-        with open(workbookPath, "rb") as file:
+            with st.spinner("Analyzing assay data..."):
 
-            st.download_button(
-                label="Download Report Workbook",
-                data=file,
-                file_name=f"{worksheetName}_Report.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                analysisData = analyzeAssay(
+                    assayData
+                )
+
+            with st.spinner("Generating report..."):
+
+                generateExcelReport(
+                    workbookPath,
+                    worksheetName,
+                    analysisData
+                )
+
+            reportPath = workbookPath
+
+            st.success(
+                "Analysis complete."
             )
 
-    except Exception as error:
+            with open(reportPath, "rb") as reportFile:
 
-        st.error(str(error))
+                st.download_button(
+                    label="Download Report Workbook",
+                    data=reportFile,
+                    file_name=f"{worksheetName}_Report{suffix}",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
+
+        except Exception as error:
+
+            st.error(
+                f"Analysis failed:\n{str(error)}"
+            )
