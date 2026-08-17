@@ -4,16 +4,12 @@ Created on Wed Aug  5 14:50:49 2026
 
 @author: adabreo
 """
-import pandas as pd 
+
+import pandas as pd
 import numpy as np
 
 from scipy.optimize import curve_fit
-from scipy.optimize import root_scalar
 
-def convertToPgMl(dataframe):
-    convertedData = dataframe.copy()
-    convertedData = convertedData * 1000
-    return convertedData
 
 def analyzeAssay(assayData):
 
@@ -48,12 +44,6 @@ def analyzeAssay(assayData):
             upperMask
         )
 
-        #
-        # PRISM MODE
-        #
-        # Interpolate anything that is not overflow/saturated.
-        # Do NOT apply lower cutoff masking before interpolation.
-        #
         interpolationData = createInterpolationData(
             blankSubtracted,
             upperMask
@@ -121,51 +111,101 @@ def analyzeAssay(assayData):
         }
 
     return analysisData
-            
+
+
 def splitControls(dataframe):
+
     curveData = dataframe.iloc[:, 0:9]
+
     controls = dataframe[["Blank", "URC", "URD"]].copy()
+
     return curveData, controls
 
+
 def findDuplicatePairs(dataframe):
+
     duplicatePairs = dataframe.index[dataframe.index.duplicated()]
+
     return list(duplicatePairs)
 
+
 def calculateBlankValues(controls):
+
     blankValues = controls.groupby(controls.index)["Blank"].transform("mean")
+
     return blankValues
 
+
 def subtractBlanks(curveData, blankValues):
+
     blankSubtracted = curveData.subtract(blankValues, axis=0)
+
     return blankSubtracted
 
-def calculateLowerCutoffs(blanksValues):
-    lowerCutoffs = blanksValues*1.3
+
+def calculateLowerCutoffs(blankValues):
+
+    lowerCutoffs = blankValues * 1.3
+
     return lowerCutoffs
 
+
 def determineUpperCutoffPoints(curveData):
+
     upperMask = pd.DataFrame(
         True,
         index=curveData.index,
         columns=curveData.columns
     )
+
     for row in curveData.index:
+
         for col in curveData.columns:
+
             value = curveData.loc[row, col]
+
             if str(value).strip().lower() == "overflow":
+
                 upperMask.loc[row, col] = False
+
             elif pd.notna(value):
-                if float(value) == 3.5:
-                    upperMask.loc[row, col] = False
+
+                try:
+
+                    if float(value) == 3.5:
+
+                        upperMask.loc[row, col] = False
+
+                except ValueError:
+
+                    pass
+
     return upperMask
 
+
 def determineLowerCutoffPoints(blankSubtracted, lowerCutoffs):
-    lowerMask = blankSubtracted.ge(lowerCutoffs, axis=0)
+
+    lowerMask = blankSubtracted.ge(
+        lowerCutoffs,
+        axis=0
+    )
+
     return lowerMask
 
+
 def createCurveFitData(blankSubtracted, upperMask):
+
     curveFitData = blankSubtracted.where(upperMask)
+
     return curveFitData
+
+
+def createInterpolationData(blankSubtracted, upperMask):
+
+    interpolationData = blankSubtracted.where(upperMask)
+
+    return interpolationData
+
 
 def prepareCurveData(curveFitData):
 
@@ -188,19 +228,34 @@ def prepareCurveData(curveFitData):
                     .replace(" mg/ml", "")
                 )
 
-                xValues.append(concentrationValue)
+                if concentrationValue > 0:
 
-                yValues.append(yValue)
+                    xValues.append(
+                        np.log10(concentrationValue)
+                    )
+
+                    yValues.append(yValue)
 
         preparedCurves[pairName] = {
-            "x": np.array(xValues),
-            "y": np.array(yValues)
+            "x": np.array(xValues, dtype=float),
+            "y": np.array(yValues, dtype=float)
         }
 
     return preparedCurves
 
-def fourPL(x, A, B, C, D):
-    return D + ((A - D) / (1 + (x / C) ** B))
+
+def fourPL(logX, Top, HillSlope, LogEC50, Bottom):
+
+    return Bottom + (
+        (Top - Bottom)
+        /
+        (
+            1 + 10 ** (
+                (LogEC50 - logX) * HillSlope
+            )
+        )
+    )
+
 
 def fitFourPL(xValues, yValues):
 
@@ -212,16 +267,16 @@ def fitFourPL(xValues, yValues):
     ]
 
     lowerBounds = [
-        0,
         -10,
-        0.0001,
-        -1
+        -10,
+        -10,
+        -10
     ]
 
     upperBounds = [
         10,
         10,
-        100,
+        10,
         10
     ]
 
@@ -236,25 +291,40 @@ def fitFourPL(xValues, yValues):
 
     return parameters
 
-def calculateRSquared(observedY, predictedY):
-    observedY = np.array(observedY)
-    residuals = observedY - predictedY
-    ssResidual = np.sum(residuals ** 2)
-    ssTotal = np.sum((observedY - np.mean(observedY)) ** 2)
-    rSquared = 1 - (ssResidual / ssTotal)
-    return rSquared
 
 def predictFourPL(xValues, parameters):
 
-    A, B, C, D = parameters
+    Top, HillSlope, LogEC50, Bottom = parameters
 
-    return fourPL(
-        np.array(xValues),
-        A,
-        B,
-        C,
-        D
+    predictedY = fourPL(
+        np.array(xValues, dtype=float),
+        Top,
+        HillSlope,
+        LogEC50,
+        Bottom
     )
+
+    return predictedY
+
+
+def calculateRSquared(observedY, predictedY):
+
+    observedY = np.array(observedY, dtype=float)
+
+    predictedY = np.array(predictedY, dtype=float)
+
+    residuals = observedY - predictedY
+
+    ssResidual = np.sum(residuals ** 2)
+
+    ssTotal = np.sum(
+        (observedY - np.mean(observedY)) ** 2
+    )
+
+    rSquared = 1 - (ssResidual / ssTotal)
+
+    return rSquared
+
 
 def fitAllFourPL(preparedCurves):
 
@@ -290,8 +360,21 @@ def fitAllFourPL(preparedCurves):
 
     return fourPLFits
 
-def fivePL(x, A, B, C, D, G):
-    return D + ((A - D) / ((1 + (x / C) ** B) ** G))
+
+def fivePL(logX, Top, HillSlope, LogEC50, Bottom, Asymmetry):
+
+    return Bottom + (
+        (Top - Bottom)
+        /
+        (
+            (
+                1 + 10 ** (
+                    (LogEC50 - logX) * HillSlope
+                )
+            ) ** Asymmetry
+        )
+    )
+
 
 def fitFivePL(xValues, yValues):
 
@@ -304,17 +387,17 @@ def fitFivePL(xValues, yValues):
     ]
 
     lowerBounds = [
-        0,
         -10,
-        0.0001,
-        -1,
+        -10,
+        -10,
+        -10,
         0.01
     ]
 
     upperBounds = [
         10,
         10,
-        100,
+        10,
         10,
         10
     ]
@@ -330,19 +413,47 @@ def fitFivePL(xValues, yValues):
 
     return parameters
 
+
 def predictFivePL(xValues, parameters):
-    A, B, C, D, G = parameters
-    predictedY = fivePL(np.array(xValues),A,B,C,D,G)
+
+    Top, HillSlope, LogEC50, Bottom, Asymmetry = parameters
+
+    predictedY = fivePL(
+        np.array(xValues, dtype=float),
+        Top,
+        HillSlope,
+        LogEC50,
+        Bottom,
+        Asymmetry
+    )
+
     return predictedY
 
+
 def fitAllFivePL(preparedCurves):
+
     fivePLFits = {}
+
     for pairName, curveData in preparedCurves.items():
+
         xValues = curveData["x"]
         yValues = curveData["y"]
-        parameters = fitFivePL(xValues, yValues)
-        predictedY = predictFivePL(xValues, parameters)
-        rSquared = calculateRSquared(yValues, predictedY)
+
+        parameters = fitFivePL(
+            xValues,
+            yValues
+        )
+
+        predictedY = predictFivePL(
+            xValues,
+            parameters
+        )
+
+        rSquared = calculateRSquared(
+            yValues,
+            predictedY
+        )
+
         fivePLFits[pairName] = {
             "xValues": xValues,
             "yValues": yValues,
@@ -350,60 +461,66 @@ def fitAllFivePL(preparedCurves):
             "predictedY": predictedY,
             "rSquared": rSquared
         }
+
     return fivePLFits
 
+
 def compareModels(fourPLFits, fivePLFits):
+
     modelComparison = {}
+
     for pairName in fourPLFits:
+
         fourPLRSquared = fourPLFits[pairName]["rSquared"]
+
         fivePLRSquared = fivePLFits[pairName]["rSquared"]
+
         modelComparison[pairName] = {
             "fourPLRSquared": fourPLRSquared,
             "fivePLRSquared": fivePLRSquared,
             "deltaRSquared": fivePLRSquared - fourPLRSquared
         }
+
     return modelComparison
-###Standard Interpolation - Withing Std Curve Range Only
-'''
-def interpolateFourPL(yValue, parameters):
-    A, B, C, D = parameters
-    try:
-        denominator = yValue - D
-        if denominator == 0:
-            return np.nan
-        ratio = ((A - D) / denominator) - 1
-        if ratio <= 0:
-            return np.nan
-        xValue = C * (ratio ** (1 / B))
-        return xValue
-    except Exception:
-        return np.nan
-'''
+
 
 def interpolate4PL(yValue, parameters):
 
     if pd.isna(yValue):
+
         return np.nan
 
-    A, B, C, D = parameters
+    Top, HillSlope, LogEC50, Bottom = parameters
 
-    upperAsymptote = max(A, D)
-    lowerAsymptote = min(A, D)
+    upperAsymptote = max(Top, Bottom)
+
+    lowerAsymptote = min(Top, Bottom)
 
     if yValue >= upperAsymptote:
+
         return np.nan
 
     if yValue <= lowerAsymptote:
+
         return np.nan
 
     try:
 
-        ratio = ((A - D) / (yValue - D)) - 1
+        ratio = ((Top - Bottom) / (yValue - Bottom)) - 1
 
         if ratio <= 0:
+
             return np.nan
 
-        concentrationNgMl = C * (ratio ** (1 / B))
+        logConcentration = (
+            LogEC50
+            - (
+                np.log10(ratio)
+                / HillSlope
+            )
+        )
+
+        concentrationNgMl = 10 ** logConcentration
 
         concentrationPgMl = concentrationNgMl * 1000
 
@@ -412,10 +529,7 @@ def interpolate4PL(yValue, parameters):
     except Exception:
 
         return np.nan
-    
-def createInterpolationData(blankSubtracted, curveMask):
-    interpolationData = blankSubtracted.where(curveMask)
-    return interpolationData
+
 
 def interpolateSampleData(interpolationData, fourPLFits):
 
@@ -424,6 +538,7 @@ def interpolateSampleData(interpolationData, fourPLFits):
     for pairName in interpolatedData.index:
 
         if pairName not in fourPLFits:
+
             continue
 
         parameters = fourPLFits[pairName]["parameters"]
@@ -441,31 +556,52 @@ def interpolateSampleData(interpolationData, fourPLFits):
 
     return interpolatedData
 
+
 def correctForDilution(interpolatedData):
-    dilutionFactors = [1, 2, 4, 8, 16, 32, 64]
+
+    dilutionFactors = [
+        2 ** i
+        for i in range(len(interpolatedData.columns))
+    ]
+
     correctedData = interpolatedData.copy()
+
     for row in correctedData.index:
+
         for columnIndex, column in enumerate(correctedData.columns):
-            if columnIndex >= len(dilutionFactors):
-                break
+
             value = correctedData.loc[row, column]
+
             if pd.notna(value):
+
                 correctedData.loc[row, column] = (
                     value * dilutionFactors[columnIndex]
                 )
+
     return correctedData
 
+
 def calculateRelativePercent(correctedData):
+
     relativeData = correctedData.copy()
+
     for pairName in correctedData.index:
+
         firstValid = correctedData.loc[pairName].dropna()
+
         if len(firstValid) == 0:
+
             continue
+
         baseline = firstValid.iloc[0]
+
         relativeData.loc[pairName] = (
-            correctedData.loc[pairName] / baseline
+            correctedData.loc[pairName]
+            / baseline
         ) * 100
+
     return relativeData
+
 
 def calculateLinearityMatrix(correctedValues):
 
@@ -507,10 +643,17 @@ def calculateLinearityMatrix(correctedValues):
 
     return matrix
 
-def createLinearityMatrices(correctedData):
-    linearityMatrices = {}
-    for pairName in correctedData.index:
-        matrix = calculateLinearityMatrix(correctedData.loc[pairName])
-        linearityMatrices[pairName] = matrix
-    return linearityMatrices
 
+def createLinearityMatrices(correctedData):
+
+    linearityMatrices = {}
+
+    for pairName in correctedData.index:
+
+        matrix = calculateLinearityMatrix(
+            correctedData.loc[pairName]
+        )
+
+        linearityMatrices[pairName] = matrix
+
+    return linearityMatrices
